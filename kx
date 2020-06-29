@@ -152,10 +152,6 @@ create_shadowsocks_config() {
     port_begin=$1
     port_end=$2
 
-    echo $port_begin
-    echo $port_end
-    [[ "${port_begin}" -eq "${port_end}" ]] && echo "eq"
-
     echo '{
     "server":"0.0.0.0",
     "local_address":"127.0.0.1",

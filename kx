@@ -19,6 +19,8 @@ usage() {
         kx -i|install
     启动:
         kx -s|restart
+        kx -s|restart [port]
+        kx -s|restart [port_begin] [port_end]
     重新启动:
         kx -r|restart
     关闭:
@@ -79,10 +81,30 @@ install_ss() {
 }
 
 start() {
+    if [[ ! -f /usr/local/bin/ssserver ]]; then
+        log_error "请先安装，执行 ./kx -i"
+        exit 1
+    fi
+
     start_ss $*
 }
 
+start_with_config() {
+    # 直接启动
+    ulimit -n 1024000 && nohup /usr/local/bin/ssserver -c /etc/shadowsocks.json -d start > /dev/null 2>&1
+    if [[ $? -eq 0 ]]; then
+        log_info "shadowsocks 已启动"
+        exit 0
+    else
+        log_error "shadowsocks 启动失败"
+        exit 1
+    fi
+}
+
 start_ss() {
+    port_begin=9003
+    port_end=9003
+
     if [[ "$#" -eq 2 ]]; then
         port_begin=$2
         port_end=$2
@@ -90,15 +112,14 @@ start_ss() {
         port_begin=$2
         port_end=$3
     else
-        # 直接启动
-        ulimit -n 1024000 && nohup /usr/local/bin/ssserver -c /etc/shadowsocks.json -d start > /dev/null 2>&1
-        if [[ $? -eq 1 ]]; then
-            log_error "shadowsocks 启动失败"
-            exit 1
-        else
-            log_info "shadowsocks 已启动"
-            exit 0    
+        if [[ -f /etc/shadowsocks.json ]]; then
+            start_with_config  
         fi
+    fi
+
+    if [[ ! "$port_begin" =~ ^[0-9]+$ ]] || [[ ! "$port_end" =~ ^[0-9]+$ ]] || [[ $port_end < $port_begin ]]; then
+        log_error "端口配置错误"
+        exit 1
     fi
 
     # 创建配置

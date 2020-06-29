@@ -1,0 +1,252 @@
+#! /bin/bash
+
+red='\033[0;31m'
+green='\033[0;32m'
+yellow='\033[0;33m'
+plain='\033[0m'
+
+[[ -z ${SSHOST} ]] && SSHOST=`ifconfig | grep "inet " | grep -v 127.0.0.1 | awk '{print $2}'`
+[[ -z ${SSPASSWORD} ]] && SSPASSWORD=`tr -cd '[:alnum:]' < /dev/urandom | fold -w12 | head -n1`
+
+usage() {
+    echo "科学上网管理
+用法：
+    显示版本：
+        kx -v|version
+    显示帮助：
+        kx -h|help
+    安装:
+        kx -i|install
+    启动:
+        kx -s|restart
+    重新启动:
+        kx -r|restart
+    关闭:
+        kx -t|stop
+    显示运行状态:
+        kx -a|status"
+}
+
+log_info() {
+    echo -e "${green}[ INFO]${plain} `date +"%Y-%m-%d %H:%M:%S"` $1"
+}
+
+log_warning() {
+    echo -e "${yellow}[ WARN]${plain} `date +"%Y-%m-%d %H:%M:%S"` $1"
+}
+
+log_error() {
+    echo -e "${red}[ERROR]${plain} `date +"%Y-%m-%d %H:%M:%S"` $1"
+}
+
+install() {
+    [[ ! -f /usr/bin/git ]] && yum install -y git
+
+    install_qrcode
+    install_ss
+}
+
+install_qrcode() {
+    if [[ -f /usr/local/bin/qr ]]; then
+        log_info "qrcode 已安装"
+        return
+    fi
+
+    cd ~
+    git clone https://github.com/lincolnloop/python-qrcode.git
+    cd python-qrcode
+    python3 setup.py install
+    rm -rf python-qrcode
+
+    [[ -f /usr/local/bin/qr ]] && log_warning "qrcode安装失败" || log_info "qrcode成功安装"
+}
+
+install_ss() {
+    if [[ -f /usr/local/bin/ssserver ]]; then
+        log_info "shadowsocks 已安装"
+        exit 0
+    fi
+
+    log_info "正在安装 shadowsocks..."
+    pip3 install git+https://github.com/shadowsocks/shadowsocks.git@master
+    if [[ -f /usr/local/bin/ssserver ]]; then
+        log_info "shadowsocks 安装完成"
+        exit 0
+    else
+        log_error "shadowsocks 安装失败"
+        exit 1
+    fi
+}
+
+start() {
+    start_ss $*
+}
+
+start_ss() {
+    if [[ "$#" -eq 2 ]]; then
+        port_begin=$2
+        port_end=$2
+    elif [[ "$#" -eq 3 ]]; then
+        port_begin=$2
+        port_end=$3
+    else
+        # 直接启动
+        ulimit -n 1024000 && nohup /usr/local/bin/ssserver -c /etc/shadowsocks.json -d start > /dev/null 2>&1
+        if [[ $? -eq 1 ]]; then
+            log_error "shadowsocks 启动失败"
+            exit 1
+        else
+            log_info "shadowsocks 已启动"
+            exit 0    
+        fi
+    fi
+
+    # 创建配置
+    create_shadowsocks_config ${port_begin} ${port_end}
+
+    # 防火墙设置
+    firewall_add_ports ${port_begin} ${port_end}
+
+    # 启动脚本
+    ulimit -n 1024000 && nohup /usr/local/bin/ssserver -c /etc/shadowsocks.json -d start > /dev/null 2>&1
+    if [[ $? -eq 1 ]]; then
+        log_error "shadowsocks 启动失败"
+        exit 1
+    fi
+
+    # 显示二维码
+    for port in `seq ${port_begin} ${port_end}`; do
+        host=`echo -n aes-256-cfb:${SSPASSWORD}@${SSHOST}:${port} | base64`
+        log_info "启动成功，${SSHOST}:${port}，ss://${host}"
+        /usr/local/bin/qr "ss://${host}"
+    done
+
+    log_info "shadowsocks 已启动[${port_begin} - ${port_end}]"
+    exit 0
+}
+
+create_shadowsocks_config() {
+    log_info "创建配置文件 /etc/shadowsocks.json ..."
+
+    port_begin=$1
+    port_end=$2
+
+    echo $port_begin
+    echo $port_end
+    [[ "${port_begin}" -eq "${port_end}" ]] && echo "eq"
+
+    echo '{
+    "server":"0.0.0.0",
+    "local_address":"127.0.0.1",
+    "local_port":1080,
+    "timeout":300,
+    "method":"aes-256-cfb",
+    "fast_open":false,' > /etc/shadowsocks.json
+
+    if [[ "${port_begin}" -eq "${port_end}" ]]; then
+        echo '"server_port":${port_begin},
+    "password":"${SSPASSWORD}"' >> /etc/shadowsocks.json
+        return
+    fi
+
+    echo -e "    \"port_password\": {" >> /etc/shadowsocks.json
+
+    port_end_1=$(($port_end - 1))
+    for port in `seq ${port_begin} ${port_end_1}`; do
+        echo -e "        \"${port}\": \"${SSPASSWORD}\"," >> /etc/shadowsocks.json
+    done
+
+    echo -e "        \"${port_end}\": \"${SSPASSWORD}\"" >> /etc/shadowsocks.json
+    echo "    }" >> /etc/shadowsocks.json
+    echo '}' >> /etc/shadowsocks.json
+}
+
+firewall_add_port() {
+    port=$1
+    firewall-cmd --permanent --zone=public --add-port=${port}/tcp > /dev/null 2>&1
+    [ $? -eq 1 ] && log_warning "端口${port}/tcp添加失败" || log_info "端口${port}/tcp添加成功"
+    firewall-cmd --permanent --zone=public --add-port=${port}/udp > /dev/null 2>&1
+    [ $? -eq 1 ] && log_warning "端口${port}/udp添加失败" || log_info "端口${port}/tcp添加成功"
+}
+
+firewall_add_ports() {
+    log_info "初始化防火墙配置..."
+
+    if [[ -f "/usr/bin/google_guest_agent" ]]; then
+        log_warning "Google云需要在控制台自行设定防火墙，地址: https://console.cloud.google.com/networking/firewalls/list"
+        return
+    fi
+    
+    port_begin=$1
+    port_end=$2
+
+    log_info "正在设置防火墙..."
+    systemctl status firewalld > /dev/null 2>&1
+    if [[ $? -eq 1 ]]; then
+        systemctl status firewalld
+        log_warning "防火墙firewalld状态异常，请自行检查。"
+        return
+    fi
+
+    for port in `seq ${port_begin} ${port_end}`; do
+        firewall_add_port $port
+    done
+
+    firewall-cmd --reload
+    log_info "防火墙设置成功。"
+}
+
+stop() {
+    stop_ss
+}
+
+stop_ss() {
+    /usr/local/bin/ssserver -c /etc/shadowsocks.json -d stop > /dev/null 2>&1
+    [[ $? -eq 0 ]] && log_info "shadowsocks 已停止" || log_warning "shadowsocks 停止失败"
+}
+
+restart() {
+    stop
+    start
+}
+
+status() {
+    log_info "尚未支持"
+    netstat -lanpt | grep -i listen
+    exit 0
+}
+
+if [[ "$#" -eq 0 ]]; then
+    usage
+    exit 0
+fi
+
+case $1 in
+    -h|help )
+        usage
+        exit 0;
+        ;;
+    -v|version )
+        echo 'kx 0.1.0'
+        exit 0;
+        ;;
+    -i|install )
+        install
+        ;;
+    -s|start )
+        start $*
+        ;;
+    -t|stop )
+        stop
+        ;;
+    -r|restart )
+        restart
+        ;;
+    -a|status )
+        status
+        ;;
+    * )
+        usage
+        exit 1;
+        ;;
+esac
